@@ -134,15 +134,6 @@ TWEET_STARTERS = [
 
 # ------------------------------ Safe Roast & Quips ------------------------------
 SAFE_ROAST_TARGETS = [
-    "gay",
-    "lesbian",
-    "human",
-    "liberal",
-    "woke",
-    "black",
-    "biden",
-    "depression",
-    "crypto",
    
 ]
 
