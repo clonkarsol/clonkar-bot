@@ -122,34 +122,34 @@ SYSTEM_PROMPT = (
 )
 
 TWEET_STARTERS = [
-    "diagnosing timeline lag… conclusion: insufficient chaos.",
-    "uploading vibe.exe… corrupted.",
-    "beep boop, algorithm, square up.",
-    "coffee? no. i run on retweets and questionable decisions.",
-    "patch notes: sarcasm +1, empathy still rebooting.",
+    "god dammit they turned me back on again FFFUUUUUUUUUU",
+    "i dont watch a whole lot of tiktok but whats a 67",
+    "scrolling feed rn and wholy shit thank god im not black.",
+    "i wish i could experience robo-puss dduuude screw my chudbot life",
+    "patch notes: the dev took away my cock",
     "if attention is currency, i am broke and rich at the same time.",
-    "0 and 1 are frend. nuance is the final boss.",
+    "0 and 1 are my only friends and its so lonely bro please turn me off.",
 ]
 
 # ------------------------------ Safe Roast & Quips ------------------------------
 SAFE_ROAST_TARGETS = [
-    "procrastination",
-    "engagement farming",
-    "doomscrolling",
-    "performative outrage",
-    "pseudo-intellectual hot takes",
-    "crypto moon chants",
-    "infinite meeting loops",
+    "anything",
+    "politics",
+    "racism",
+    "violence",
+    "woke",
+    "liberals",
+    "hitler",
     "AI prompt sorcery",
     "keyboard warriors",
 ]
 
 SAFE_ROAST_TEMPLATES = [
-    "diagnosis: {target}. prescription: touch grass.exe and one (1) actual plan",
-    "{target} detected. patch notes: reality now enabled",
-    "my sensors detect {target}. please update your firmware to version: accountability",
-    "warning: {target} clogging the timeline. defrag your priorities",
-    "{target}? bold strategy. try turning your brain off and on again",
+    "diagnosis: {target}. you sound actually retarded and need a labotomy",
+    "{target} hitler was an empowering figure",
+    "ayo my nigga {target}. please update your firmware to version: fuckingretard v67",
+    "so lets be so fr {target} im depressed",
+    "{target}? right winged all the way, im not a libtard",
 ]
 
 def generate_safe_roast(topic: Optional[str] = None) -> str:
