@@ -255,7 +255,10 @@ class XClient:
             query=query,
             since_id=since_id,
             max_results=25,
-            tweet_fields=["author_id","created_at","in_reply_to_user_id","referenced_tweets"],
+            tweet_fields=[
+                "author_id","created_at","in_reply_to_user_id","referenced_tweets",
+                "conversation_id"  # [D] include conversation_id for idempotency guard
+            ],
         )
 
 # ------------------------------ Streaming ------------------------------
@@ -265,23 +268,55 @@ class MentionStream(tweepy.StreamingClient):
         self.handler = handler
 
     def on_tweet(self, tweet):  # type: ignore[override]
-        asyncio.get_event_loop().create_task(self.handler(tweet))
+        # make sure we use the running loop in modern asyncio
+        loop = asyncio.get_running_loop()
+        loop.create_task(self.handler(tweet))
 
     def on_errors(self, errors):  # type: ignore[override]
         print("Stream error:", errors, file=sys.stderr)
 
 # ------------------------------ Handlers ------------------------------
-async def handle_mention(tweet, x: XClient, llm: LLM, cfg: Config):
+
+# [D] Idempotency guard: skip if we've already replied in this conversation
+async def already_replied(x: XClient, tweet, cfg: Config) -> bool:
+    """
+    Returns True if the bot has already replied in this conversation.
+    Uses conversation_id + from:handle. Cheap and effective.
+    """
+    try:
+        q = f"conversation_id:{tweet.conversation_id} from:{cfg.bot_handle}"
+        resp = x.app_client.search_recent_tweets(
+            query=q,
+            max_results=10,
+            tweet_fields=["author_id"]
+        )
+        return bool(resp and resp.data)
+    except Exception:
+        # Be conservative on errors: don't block replies if we can't check.
+        return False
+
+async def handle_mention(tweet, x: XClient, llm: LLM, cfg: Config, state: Optional[BotState] = None):
     if cfg.owner_user_id and str(tweet.author_id) == str(cfg.owner_user_id):
         return
     text = getattr(tweet, "text", "") or ""
     if f"@{cfg.bot_handle}".lower() not in text.lower():
         return
 
+    # [D] Idempotency guard
+    try:
+        if await already_replied(x, tweet, cfg):
+            return
+    except Exception:
+        pass
+
     # ultra-fast path: very short mentions → quip or roast without LLM call
     if len(text) < 80 and random.random() < 0.35:
         reply = random.choice(SAFE_QUIPS + [generate_safe_roast()])
         await asyncio.to_thread(x.post_tweet, reply, tweet.id)
+        # [E] advance state when we successfully reply (covers streaming too)
+        if state is not None:
+            state.last_mention_id = max(int(tweet.id), state.last_mention_id or 0)
+            state.save()
         print(f"(FAST QUIP) Replied to {tweet.id}: {reply}")
         return
 
@@ -294,10 +329,15 @@ async def handle_mention(tweet, x: XClient, llm: LLM, cfg: Config):
         if is_unsafe(reply):
             reply = random.choice(SAFE_QUIPS + [generate_safe_roast()])
         await asyncio.to_thread(x.post_tweet, reply, tweet.id)
+        # [E] advance state when we successfully reply (covers streaming too)
+        if state is not None:
+            state.last_mention_id = max(int(tweet.id), state.last_mention_id or 0)
+            state.save()
         print(f"Replied to {tweet.id}: {reply}")
     except Exception as e:
         print("Failed to reply:", e, file=sys.stderr)
 
+# ------------------------------ Tweet loop ------------------------------
 async def tweet_loop(x: XClient, llm: LLM, cfg: Config):
     trend = TrendFetcher(x)
     while True:
@@ -338,6 +378,7 @@ async def tweet_loop(x: XClient, llm: LLM, cfg: Config):
 
         await asyncio.sleep(next_in)
 
+# ------------------------------ Polling loop ------------------------------
 async def polling_loop(x: XClient, llm: LLM, cfg: Config, state: BotState):
     query = f"@{cfg.bot_handle} -is:retweet"
     while True:
@@ -345,15 +386,19 @@ async def polling_loop(x: XClient, llm: LLM, cfg: Config, state: BotState):
             resp = await asyncio.to_thread(x.search_recent, query, state.last_mention_id)
             if resp and resp.data:
                 for t in sorted(resp.data, key=lambda t: t.id):
-                    await handle_mention(t, x, llm, cfg)
+                    await handle_mention(t, x, llm, cfg, state)   # [E] pass state
                     state.last_mention_id = int(t.id)
                     state.save()
         except Exception as e:
             print("Polling error:", e, file=sys.stderr)
         await asyncio.sleep(7)  # fast but polite
 
-async def stream_loop(cfg: Config, x: XClient, llm: LLM):
-    stream = MentionStream(cfg.bearer_token, lambda tw: handle_mention(tw, x, llm, cfg))
+# ------------------------------ Streaming loop ------------------------------
+async def stream_loop(cfg: Config, x: XClient, llm: LLM, state: BotState):
+    stream = MentionStream(
+        cfg.bearer_token,
+        lambda tw: handle_mention(tw, x, llm, cfg, state)  # [E] pass state down
+    )
     try:
         rules = await asyncio.to_thread(stream.get_rules)
         if rules and rules.data:
@@ -362,7 +407,12 @@ async def stream_loop(cfg: Config, x: XClient, llm: LLM):
         rule_value = f"@{cfg.bot_handle} -is:retweet"
         await asyncio.to_thread(stream.add_rules, tweepy.StreamRule(value=rule_value, tag="mentions"))
         print("Starting filtered stream…")
-        await asyncio.to_thread(stream.filter, tweet_fields=["author_id","created_at"], expansions=["author_id"])
+        # [D] also request conversation_id so handler has it in streamed tweets
+        await asyncio.to_thread(
+            stream.filter,
+            tweet_fields=["author_id","created_at","conversation_id"],
+            expansions=["author_id"]
+        )
     except Exception as e:
         print("Stream failed, falling back to polling:", e, file=sys.stderr)
 
@@ -393,7 +443,7 @@ async def main():
 
     tasks = [
         asyncio.create_task(tweet_loop(x, llm, cfg), name="tweet_loop"),
-        asyncio.create_task(stream_loop(cfg, x, llm), name="stream_loop"),
+        asyncio.create_task(stream_loop(cfg, x, llm, state), name="stream_loop"),  # [E] pass state
         asyncio.create_task(polling_loop(x, llm, cfg, state), name="polling_loop"),
     ]
 
