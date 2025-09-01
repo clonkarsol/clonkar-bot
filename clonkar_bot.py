@@ -161,11 +161,7 @@ def generate_safe_roast(topic: Optional[str] = None) -> str:
     return line[:280]
 
 SAFE_QUIPS = [
-    "compiling comeback… failed successfully",
-    "beep boop. sarcasm module online",
-    "my opinions are cached. refresh for chaos",
-    "error 429: too many takes",
-    "algorithm says you are the main character today. good luck",
+   
 ]
 
 # ------------------------------ Trend Fetcher (X search) ------------------------------
