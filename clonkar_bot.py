@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Clonkar X Bot (safe edition):
-- Tweets every ~30 minutes (with jitter to avoid bot-like timing)
-- Listens for posts/comments containing "@clonkarsol" and replies fast
+Clonkar X Bot (safe edition) — Random Daily Tweets:
+- Tweets randomly a couple times per day (default 2–3), scheduled within awake hours
+- Listens for posts/comments containing "@clonkarsol" and chooses what it replies to
 - Uses OpenAI for text generation with strict safety filters (no hate/harassment/illegal content)
 - Supports Streaming API (preferred) and polling fallback
 - Resilient networking with retries + rate-limit handling
@@ -18,7 +18,7 @@ import signal
 import sys
 import time
 from dataclasses import dataclass
-from typing import Optional, Dict
+from typing import Optional, Dict, List, Tuple
 
 import tweepy
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -46,6 +46,14 @@ class Config:
     openai_api_key: str
     bot_handle: str = os.environ.get("BOT_HANDLE", "clonkarsol")
     owner_user_id: Optional[str] = os.environ.get("OWNER_USER_ID")
+
+    # New daily scheduling controls (replaces fixed 30-min interval)
+    tweets_per_day_min: int = int(os.environ.get("TWEETS_PER_DAY_MIN", "2"))
+    tweets_per_day_max: int = int(os.environ.get("TWEETS_PER_DAY_MAX", "3"))
+    quiet_hours_start: int = int(os.environ.get("QUIET_HOURS_START", "2"))  # inclusive
+    quiet_hours_end: int = int(os.environ.get("QUIET_HOURS_END", "6"))      # exclusive
+
+    # Deprecated (kept for compatibility; no longer used):
     tweet_interval_minutes: int = int(os.environ.get("TWEET_INTERVAL_MINUTES", "30"))
 
     @staticmethod
@@ -55,7 +63,7 @@ class Config:
         ] if not os.environ.get(k)]
         if missing:
             raise RuntimeError(f"Missing env vars: {', '.join(missing)}")
-        return Config(
+        cfg = Config(
             api_key=os.environ["X_API_KEY"],
             api_secret=os.environ["X_API_SECRET"],
             access_token=os.environ["X_ACCESS_TOKEN"],
@@ -63,6 +71,14 @@ class Config:
             bearer_token=os.environ["X_BEARER_TOKEN"],
             openai_api_key=os.environ["OPENAI_API_KEY"],
         )
+        # Safety clamps & sanity
+        if cfg.tweets_per_day_min < 1:
+            cfg.tweets_per_day_min = 1
+        if cfg.tweets_per_day_max < cfg.tweets_per_day_min:
+            cfg.tweets_per_day_max = cfg.tweets_per_day_min
+        cfg.quiet_hours_start %= 24
+        cfg.quiet_hours_end %= 24
+        return cfg
 
 # ------------------------------ State ------------------------------
 class BotState(BaseModel):
@@ -184,13 +200,13 @@ class TrendFetcher:
 
     def __init__(self, xclient: 'XClient'):
         self.x = xclient
-        self.last_topics = []
+        self.last_topics: List[str] = []
         self.last_refresh = 0.0
 
     def should_refresh(self) -> bool:
         return (time.time() - self.last_refresh) > 15 * 60  # every 15 minutes
 
-    def fetch_topics(self):
+    def fetch_topics(self) -> List[str]:
         try:
             resp = self.x.app_client.search_recent_tweets(
                 query=self.COMMON_QUERY,
@@ -319,16 +335,77 @@ async def handle_mention(tweet, x: XClient, llm: LLM, cfg: Config):
     except Exception as e:
         print("Failed to reply:", e, file=sys.stderr)
 
+# ------------------------------ Random Daily Schedule Helpers ------------------------------
+def _is_quiet_hour(ts: float, quiet_start: int, quiet_end: int) -> bool:
+    """Return True if timestamp falls within quiet hours (local time). Handles wrap-around (e.g., 22–6)."""
+    hr = time.localtime(ts).tm_hour
+    if quiet_start == quiet_end:
+        return False  # disabled
+    if quiet_start < quiet_end:
+        return quiet_start <= hr < quiet_end
+    # wrap-around
+    return hr >= quiet_start or hr < quiet_end
+
+def _build_daily_schedule(start_ts: float, n_posts: int, quiet_window: Tuple[int,int]) -> List[float]:
+    """Pick n random timestamps within the next 24h excluding quiet hours."""
+    day = 24 * 3600
+    chosen: set[float] = set()
+    attempts = 0
+    while len(chosen) < n_posts and attempts < n_posts * 200:
+        attempts += 1
+        offset = random.randint(0, day - 1)
+        ts = start_ts + offset
+        if not _is_quiet_hour(ts, quiet_window[0], quiet_window[1]):
+            # round to the nearest minute to look less botty
+            ts = int(ts // 60) * 60 + random.randint(0, 20)  # add up to 20s jitter
+            chosen.add(float(ts))
+    slots = sorted(chosen)
+    if len(slots) < n_posts:
+        # Fallback: if quiet window blocks too much, allow within it sparsely
+        while len(slots) < n_posts:
+            offset = random.randint(0, day - 1)
+            ts = start_ts + offset
+            ts = int(ts // 60) * 60 + random.randint(0, 20)
+            slots.append(float(ts))
+        slots.sort()
+    return slots
+
+# ------------------------------ Tweet Loop (Random Daily) ------------------------------
 async def tweet_loop(x: XClient, llm: LLM, cfg: Config):
     trend = TrendFetcher(x)
-    while True:
-        base = cfg.tweet_interval_minutes * 60
-        jitter = random.randint(int(-0.2*base), int(0.2*base))
-        next_in = max(60, base + jitter)  # at least 60s
 
+    schedule: List[float] = []
+    rng = random.Random()  # dedicated RNG instance
+
+    while True:
+        now = time.time()
+
+        # Refill a 24h schedule if empty or fully consumed/past
+        if not schedule or now > schedule[-1] + 5:
+            count = rng.randint(cfg.tweets_per_day_min, cfg.tweets_per_day_max)
+            schedule = _build_daily_schedule(
+                start_ts=now,
+                n_posts=count,
+                quiet_window=(cfg.quiet_hours_start, cfg.quiet_hours_end),
+            )
+            print(f"[Scheduler] New 24h plan with {len(schedule)} posts.")
+
+        # Drop any missed slots (e.g., after downtime)
+        while schedule and schedule[0] <= now + 1:
+            schedule.pop(0)
+
+        # If somehow empty again, rebuild immediately
+        if not schedule:
+            continue
+
+        next_at = schedule[0]
+        sleep_for = max(5, int(next_at - now))
+        await asyncio.sleep(sleep_for)
+
+        # Time to craft & tweet
         try:
             topics = trend.fetch_topics() if trend.should_refresh() else trend.last_topics
-            tweet_text = None
+            tweet_text: Optional[str] = None
             if topics and random.random() < 0.6:
                 starter = f"{random.choice(topics)} and timeline chaos"
                 if random.random() < 0.5:
@@ -350,15 +427,19 @@ async def tweet_loop(x: XClient, llm: LLM, cfg: Config):
                         max_tokens=120,
                     )
 
-            if is_unsafe(tweet_text):
+            if is_unsafe(tweet_text or ""):
                 tweet_text = random.choice(SAFE_QUIPS + [generate_safe_roast()])
             await asyncio.to_thread(x.post_tweet, tweet_text)
             print(f"Tweeted: {tweet_text}")
+
         except Exception as e:
             print("Tweet error:", e, file=sys.stderr)
 
-        await asyncio.sleep(next_in)
+        # Consume this slot
+        if schedule and schedule[0] <= next_at + 1:
+            schedule.pop(0)
 
+# ------------------------------ Polling Loop ------------------------------
 async def polling_loop(x: XClient, llm: LLM, cfg: Config, state: BotState):
     query = f"@{cfg.bot_handle} -is:retweet"
     while True:
@@ -373,6 +454,7 @@ async def polling_loop(x: XClient, llm: LLM, cfg: Config, state: BotState):
             print("Polling error:", e, file=sys.stderr)
         await asyncio.sleep(7)  # fast but polite
 
+# ------------------------------ Streaming ------------------------------
 async def stream_loop(cfg: Config, x: XClient, llm: LLM):
     stream = MentionStream(cfg.bearer_token, lambda tw: handle_mention(tw, x, llm, cfg))
     try:
