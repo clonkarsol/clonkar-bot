@@ -1,7 +1,7 @@
 # Clonkar Bot (X/Twitter)
 
 An edgy-but-safe meme bot that:
-- Tweets ~every 30 minutes (with jitter)
+- Tweets randomly (with jitter)
 - Replies fast to mentions of `@clonkarsol` (quip fast-path + LLM path)
 - Riffs on lightweight trends (recent hashtag scan)
 - Uses OpenAI + local safety filters + moderation to avoid hateful/harassing content
