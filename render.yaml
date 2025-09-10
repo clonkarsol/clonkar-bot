@@ -1,0 +1,6 @@
+services:
+  - type: worker
+    name: clonkar-bot
+    env: docker
+    dockerfilePath: ./Dockerfile
+    autoDeploy: true
