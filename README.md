@@ -2,9 +2,8 @@
 
 An edgy-but-safe meme bot that:
 - Tweets randomly (with jitter)
-- Replies fast to mentions of `@clonkarsol` (quip fast-path + LLM path)
+- Chooses what to reply to containing `@clonkarsol` (quip fast-path + LLM path)
 - Riffs on lightweight trends (recent hashtag scan)
-- Uses OpenAI + local safety filters + moderation to avoid hateful/harassing content
 
 > **Note:** Keep `.env` private. Never commit secrets!
 
